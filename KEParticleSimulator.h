@@ -23,7 +23,10 @@ freely, subject to the following restrictions:
 
 #ifndef KEParticleSimulator_h
 #define KEParticleSimulator_h
-
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 #include <stdint.h>
 
 /*typedef uint8_t KEParticleSimulatorTypeCode;
@@ -115,5 +118,10 @@ enum
 
 void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, KEParticleSimulatorClusterElementMappingMode mappingMode);
 void KEParticleSimulatorUnmapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
+
+#ifdef __cplusplus
+}
+//extern "C"
+#endif
 
 #endif
