@@ -70,7 +70,7 @@ const char* KEParticleSimulatorPollErrorMessages(KEParticleSimulator* self);
 
 void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds);
 
-KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type, uint32_t elementCount);
+KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type);
 void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
 
 /*void KEParticleSimulatorBeginClusterEditing(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
@@ -116,7 +116,7 @@ enum
 	KEParticleSimulatorClusterElementMappingModeWrite = (1 << 1),
 };
 
-void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, KEParticleSimulatorClusterElementMappingMode mappingMode);
+void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, uint32_t elementCount, KEParticleSimulatorClusterElementMappingMode mappingMode);
 void KEParticleSimulatorUnmapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
 
 #ifdef __cplusplus

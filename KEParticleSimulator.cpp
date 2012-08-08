@@ -22,6 +22,9 @@ struct KEParticleSimulator
 	std::vector<Cluster> clusters;
 };
 
+extern "C"
+{
+
 KEParticleSimulator* KEParticleSimulatorNew(void)
 {
 	KEParticleSimulator* self = new KEParticleSimulator;
@@ -53,9 +56,10 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 	//Eventually make this a user changeable value
 	const float secondsPerUpdate = 1.0f / 30.0f;
 	//For each cluster
-	for (KEParticleSimulatorClusterID i = 0; i < self->clusters.size(); i++)
+	for (std::vector<Cluster>::iterator cluster = self->clusters.begin(); cluster not_eq self->clusters.end(); cluster++)
+	//for (uint32_t i = 0; i < self->clusters.size(); i++)
 	{
-		Cluster* cluster = & self->clusters[i];
+		//Cluster* cluster = &(self->clusters[i]);
 		//Check if it is in use or not, skip to the next one if it isn't
 		if(not cluster->isAllocated) continue;
 		switch (cluster->type)
@@ -70,9 +74,8 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 						KEParticleSimulatorClusterElementParticle* particle = j + (KEParticleSimulatorClusterElementParticle*) cluster->elements;
 						//Begin brute-force, unoptimized force accumulation
 						//Iterate over each cluster again
-						for (KEParticleSimulatorClusterID i = 0; i < self->clusters.size(); i++)
+						for (std::vector<Cluster>::iterator forceCluster = self->clusters.begin(); forceCluster not_eq self->clusters.end(); forceCluster++)
 						{
-							const Cluster* forceCluster = & self->clusters[i];
 							if(not forceCluster->isAllocated) continue;
 							switch (forceCluster->type)
 							{
@@ -93,9 +96,9 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 										//Skip this force if the particle is out of range
 										if(distanceSquared > (directionalForce->radius * directionalForce->radius)) continue;
 										//We need the inverse distance for attenuation
-										float inverseDistance = 1.0f/sqrtf(distanceSquared);
+										float inverseDistance = 1.0f / sqrtf(distanceSquared);
 										//Attenuate by the inverse distance, scale the force by the inverse mass, and scale by the update time
-										float accelerationFactor = (1 / particle->mass) * inverseDistance * secondsPerUpdate;
+										float accelerationFactor = (1.0f / particle->mass) * inverseDistance * secondsPerUpdate;
 										//Now add to the velocity
 										for (int l = 0; l < 3; l++)
 											particle->velocity[l] += directionalForce->force[l] * accelerationFactor;
@@ -144,24 +147,13 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 	}
 }
 
-KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type, uint32_t elementCount)
+KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type)
 {
 	Cluster cluster;
 	cluster.isAllocated = true;
 	cluster.type = type;
-	cluster.elementCount = elementCount;
-	switch (type)
-	{
-		case KEParticleSimulatorClusterTypeDirectionalForce:
-			cluster.elements = calloc(elementCount, sizeof(KEParticleSimulatorClusterElementDirectionalForce));
-			break;
-		case KEParticleSimulatorClusterTypeParticle:
-			cluster.elements = calloc(elementCount, sizeof(KEParticleSimulatorClusterElementParticle));
-			break;
-		case KEParticleSimulatorClusterTypeRadialForce:
-			cluster.elements = calloc(elementCount, sizeof(KEParticleSimulatorClusterElementRadialForce));
-			break;
-	}
+	cluster.elementCount = 0;
+	cluster.elements = NULL;
 	
 	//Find an empty slot if it exists
 	for (KEParticleSimulatorClusterID i = 0; i < self->clusters.size(); i++)
@@ -173,7 +165,7 @@ KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulato
 	
 	//Otherwise, make a new one
 	self->clusters.push_back(cluster);
-	return self->clusters.size();
+	return (KEParticleSimulatorClusterID) self->clusters.size();
 }
 
 void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID)
@@ -185,11 +177,32 @@ void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimu
 	if(self->clusters.size() == clusterID) self->clusters.pop_back();
 }
 
-void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, KEParticleSimulatorClusterElementMappingMode mappingMode)
+void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, uint32_t elementCount, KEParticleSimulatorClusterElementMappingMode mappingMode)
 {
 	if(not clusterID) return NULL;
 	Cluster* cluster = & self->clusters[clusterID - 1];
 	cluster->mappingMode = mappingMode;
+	//if it's the same size, we just exit
+	if(cluster->elementCount == elementCount) return cluster->elements;
+	//otherwise, we need to do a reallocation
+	size_t elementSize = 0;
+	switch (cluster->type)
+	{
+		case KEParticleSimulatorClusterTypeDirectionalForce:
+			elementSize = sizeof(KEParticleSimulatorClusterElementDirectionalForce);
+			break;
+		case KEParticleSimulatorClusterTypeParticle:
+			elementSize = sizeof(KEParticleSimulatorClusterElementParticle);
+			break;
+		case KEParticleSimulatorClusterTypeRadialForce:
+			elementSize = sizeof(KEParticleSimulatorClusterElementRadialForce);
+			break;
+	}
+	cluster->elements = realloc(cluster->elements, elementSize * elementCount);
+	//If the new allocation is larger than the old allocation, zero out the new memory regions, but leave the old data in the old regions
+	if(cluster->elementCount < elementCount) memset(((char*)cluster->elements) + elementSize * cluster->elementCount, 0, elementSize * (elementCount - cluster->elementCount));
+	//And finally update the element count to reflect the new one
+	cluster->elementCount = elementCount;
 	return cluster->elements;
 }
 
@@ -202,3 +215,6 @@ void KEParticleSimulatorUnmapClusterElements(KEParticleSimulator* self, KEPartic
 	if(not (mappingMode & KEParticleSimulatorClusterElementMappingModeWrite)) return;
 	//Update cache, or whatever, here
 }
+
+}
+//extern  "C"
