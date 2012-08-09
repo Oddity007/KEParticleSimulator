@@ -80,15 +80,264 @@ namespace
 		uint32_t elementCount;
 		bool isAllocated;
 		KEParticleSimulatorClusterElementMappingMode mappingMode;
-		double overdueTimeLeft;
 		AABB bounds;
+	};
+	
+	struct UpdateableClusterCache
+	{
+		std::vector<const Cluster*> intersectingDirectionalForceClusters;
+		std::vector<const Cluster*> intersectingRadialForceClusters;
+		struct Package
+		{
+			Cluster* particleCluster;
+			uint32_t
+				intersectingDirectionalForceClusterCount,
+				intersectingRadialForceClusterCount;
+		};
+		std::vector<Package> updateableParticleClusterPackages;
 	};
 }
 
 struct KEParticleSimulator
 {
 	std::vector<Cluster> clusters;
+	UpdateableClusterCache* updateableClusterCache;
+	double overdueTimeLeft;
 };
+
+namespace
+{
+	static void RecalculateSingleSimulatorClusterCache(KEParticleSimulator* self, Cluster* cluster)
+	{
+		switch (cluster->type)
+		{
+			case KEParticleSimulatorClusterTypeParticle:
+				{
+					const KEParticleSimulatorClusterElementParticle* elements = (const KEParticleSimulatorClusterElementParticle*) cluster->elements;
+					float
+						minimums[3],
+						maximums[3];
+					memcpy(minimums, elements[0].position, sizeof(minimums));
+					memcpy(maximums, elements[0].position, sizeof(maximums));
+					for (uint32_t i = 0; i < cluster->elementCount; i++)
+					{
+						for (int j = 0; j < 3; j++)
+						{
+							float position = elements[i].position[j];
+							maximums[j] = (position > maximums[j]) ? position : maximums[j];
+							minimums[j] = (position < minimums[j]) ? position : minimums[j];
+						}
+					}
+					for (int i = 0; i < 3; i++)
+					{
+						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
+						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
+					}
+				}
+				break;
+			case KEParticleSimulatorClusterTypeDirectionalForce:
+				{
+					const KEParticleSimulatorClusterElementDirectionalForce* elements = (const KEParticleSimulatorClusterElementDirectionalForce*) cluster->elements;
+					float
+						minimums[3],
+						maximums[3];
+					memcpy(minimums, elements[0].position, sizeof(minimums));
+					memcpy(maximums, elements[0].position, sizeof(maximums));
+					for (uint32_t i = 0; i < cluster->elementCount; i++)
+					{
+						for (int j = 0; j < 3; j++)
+						{
+							float maximum = elements[i].position[j] + elements[i].radius;
+							maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
+							float minimum = elements[i].position[j] - elements[i].radius;
+							minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
+						}
+					}
+					for (int i = 0; i < 3; i++)
+					{
+						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
+						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
+					}
+				}
+				break;
+			case KEParticleSimulatorClusterTypeRadialForce:
+				{
+					const KEParticleSimulatorClusterElementRadialForce* elements = (const KEParticleSimulatorClusterElementRadialForce*) cluster->elements;
+					float
+						minimums[3],
+						maximums[3];
+					memcpy(minimums, elements[0].position, sizeof(minimums));
+					memcpy(maximums, elements[0].position, sizeof(maximums));
+					for (uint32_t i = 0; i < cluster->elementCount; i++)
+					{
+						for (int j = 0; j < 3; j++)
+						{
+							float maximum = elements[i].position[j] + elements[i].radius;
+							maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
+							float minimum = elements[i].position[j] - elements[i].radius;
+							minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
+						}
+					}
+					for (int i = 0; i < 3; i++)
+					{
+						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
+						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
+					}
+				}
+				break;
+		}
+	}
+	
+	static void RegenerateSimulatorUpdateableClusterCache(KEParticleSimulator* self)
+	{
+		//if(self->updateableClusterCache) return;
+		if(not self->updateableClusterCache) self->updateableClusterCache = new UpdateableClusterCache;
+		//Clear out the old data
+		self->updateableClusterCache->intersectingDirectionalForceClusters.clear();
+		self->updateableClusterCache->intersectingRadialForceClusters.clear();
+		self->updateableClusterCache->updateableParticleClusterPackages.clear();
+		//For each cluster
+		for (uint32_t particleClusterIndex = 0; particleClusterIndex < self->clusters.size(); particleClusterIndex++)
+		//for (uint32_t i = 0; i < self->clusters.size(); i++)
+		{
+			Cluster* particleCluster = &(self->clusters[particleClusterIndex]);
+			UpdateableClusterCache::Package package;
+			//Check if it is in use or not, skip to the next one if it isn't
+			if(not particleCluster->isAllocated) continue;
+			//Skip if it's not a particle cluster
+			if(particleCluster->type not_eq KEParticleSimulatorClusterTypeParticle) continue;
+			//If we have no elements, skip
+			if(not particleCluster->elementCount) continue;
+			//Now collect all force clusters that intersect this cluster
+			package.intersectingDirectionalForceClusterCount = 0;
+			package.intersectingRadialForceClusterCount = 0;
+			package.particleCluster = particleCluster;
+			for (uint32_t forceClusterIndex = 0; forceClusterIndex < self->clusters.size(); forceClusterIndex++)
+			{
+				const Cluster* forceCluster = &(self->clusters[forceClusterIndex]);
+				if(not forceCluster->isAllocated) continue;
+				if(not AABB::CheckIntersection(forceCluster->bounds, particleCluster->bounds)) continue;
+				switch (forceCluster->type)
+				{
+					case KEParticleSimulatorClusterTypeParticle: break;
+					case KEParticleSimulatorClusterTypeDirectionalForce:
+						self->updateableClusterCache->intersectingDirectionalForceClusters.push_back(forceCluster);
+						package.intersectingDirectionalForceClusterCount++;
+						break;
+					case KEParticleSimulatorClusterTypeRadialForce:
+						self->updateableClusterCache->intersectingRadialForceClusters.push_back(forceCluster);
+						package.intersectingRadialForceClusterCount++;
+						break;
+				}
+			}
+			self->updateableClusterCache->updateableParticleClusterPackages.push_back(package);
+		}
+	}
+
+	static void ClearSimulatorUpdateableClusterCache(KEParticleSimulator* self)
+	{
+		delete self->updateableClusterCache;
+		self->updateableClusterCache = NULL;
+	}
+	
+	static void UpdateParticleVelocityWithDirectionalForce(KEParticleSimulatorClusterElementParticle* particle, const KEParticleSimulatorClusterElementDirectionalForce* directionalForce, double secondsPerUpdate)
+	{
+		//Calcuate the distance squared between the particle and force
+		float distanceSquared = 0;
+		for (int l = 0; l < 3; l++)
+		{
+			float difference = particle->position[l] - directionalForce->position[l];
+			distanceSquared += difference * difference;
+		}
+		//Skip this force if the particle is out of range
+		if(distanceSquared > (directionalForce->radius * directionalForce->radius)) return;
+		//We need the inverse distance for attenuation
+		float inverseDistance = InvSqrt(distanceSquared);
+		//Attenuate by the inverse distance, scale the force by the inverse mass, and scale by the update time
+		float accelerationFactor = (1.0f / particle->mass) * inverseDistance * secondsPerUpdate;
+		//Now add to the velocity
+		for (int l = 0; l < 3; l++)
+			particle->velocity[l] += directionalForce->force[l] * accelerationFactor;
+	}
+
+	static void UpdateParticleVelocityWithRadialForce(KEParticleSimulatorClusterElementParticle* particle, const KEParticleSimulatorClusterElementRadialForce* radialForce, double secondsPerUpdate)
+	{
+		//Calcuate the distance squared and direction vector between the particle and force.  We don't normalize the direction just yet though.
+		float distanceSquared = 0;
+		float direction[3];
+		for (int l = 0; l < 3; l++)
+		{
+			float difference = particle->position[l] - radialForce->position[l];
+			direction[l] = difference;
+			distanceSquared += difference * difference;
+		}
+		//Skip this force if the particle is out of range
+		if(distanceSquared > (radialForce->radius * radialForce->radius)) return;
+		//We need the inverse distance for attenuation
+		float inverseDistance = InvSqrt(distanceSquared);
+		//Attenuate by the inverse distance, scale the force by the inverse mass, and scale by the update time
+		//We multiply by the square inverse distance so we can normalize and attenuate at the same time
+		float acceleration = (radialForce->force / particle->mass) * inverseDistance * inverseDistance * secondsPerUpdate;
+		//Now add to the velocity
+		for (int l = 0; l < 3; l++)
+			particle->velocity[l] += direction[l] * acceleration;
+	}
+
+	static void UpdateSimulator(KEParticleSimulator* self, double secondsPerUpdate)
+	{
+		uint32_t
+			intersectingDirectionalForceClusterIterationBaseIndex = 0,
+			intersectingRadialForceClusterIterationBaseIndex = 0;
+	
+		//Iterate the packages
+		for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
+		{
+			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
+			{
+				for (uint32_t j = 0; j < package.particleCluster->elementCount; j++)
+				{
+					KEParticleSimulatorClusterElementParticle* particle = j + (KEParticleSimulatorClusterElementParticle*) package.particleCluster->elements;
+					//Begin brute-force, unoptimized force accumulation
+					//Iterate over each intersecting directional force cluster
+					for (uint32_t i = 0; i < package.intersectingDirectionalForceClusterCount; i++)
+					{
+						const Cluster* forceCluster = self->updateableClusterCache->intersectingDirectionalForceClusters[intersectingDirectionalForceClusterIterationBaseIndex + i];
+						for (uint32_t k = 0; k < forceCluster->elementCount; k++)
+						{
+							const KEParticleSimulatorClusterElementDirectionalForce* directionalForce = k + (KEParticleSimulatorClusterElementDirectionalForce*) forceCluster->elements;
+							UpdateParticleVelocityWithDirectionalForce(particle, directionalForce, secondsPerUpdate);
+						}
+					}
+				
+					//Iterate over each intersecting radial force cluster
+					for (uint32_t i = 0; i < package.intersectingRadialForceClusterCount; i++)
+					{
+						const Cluster* forceCluster = self->updateableClusterCache->intersectingRadialForceClusters[intersectingRadialForceClusterIterationBaseIndex + i];
+						for (uint32_t k = 0; k < forceCluster->elementCount; k++)
+						{
+							const KEParticleSimulatorClusterElementRadialForce* radialForce = k + (KEParticleSimulatorClusterElementRadialForce*) forceCluster->elements;
+							UpdateParticleVelocityWithRadialForce(particle, radialForce, secondsPerUpdate);
+						}
+					}
+					//End force accumulation
+					//Now update the particle position with the velocity
+					for (int k = 0; k < 3; k++)
+							particle->position[k] += particle->velocity[k] * secondsPerUpdate;
+				}
+			}
+			//Shift the intersecting cluster iteration base indices
+			intersectingDirectionalForceClusterIterationBaseIndex += package.intersectingDirectionalForceClusterCount;
+			intersectingRadialForceClusterIterationBaseIndex += package.intersectingRadialForceClusterCount;
+		}
+		
+		//Now regenerate the AABBs.  This is done separately, as we can get away with doing this less often if we want.
+		for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
+		{
+			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
+			RecalculateSingleSimulatorClusterCache(self, package.particleCluster);
+		}
+	}
+}
 
 extern "C"
 {
@@ -96,6 +345,8 @@ extern "C"
 KEParticleSimulator* KEParticleSimulatorNew(void)
 {
 	KEParticleSimulator* self = new KEParticleSimulator;
+	self->updateableClusterCache = NULL;
+	self->overdueTimeLeft = 0;
 	return self;
 }
 
@@ -109,6 +360,7 @@ void KEParticleSimulatorDelete(KEParticleSimulator* self)
 		if(not cluster->isAllocated) continue;
 		free(cluster->elements);
 	}
+	ClearSimulatorUpdateableClusterCache(self);
 	delete self;
 }
 
@@ -118,106 +370,28 @@ const char* KEParticleSimulatorPollErrorMessages(KEParticleSimulator* self)
 	return NULL;
 }
 
-//This update loop's code is temporary until I performance test it and optimize.
 void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 {
+	RegenerateSimulatorUpdateableClusterCache(self);
+
 	//Eventually make this a user changeable value
 	const float secondsPerUpdate = 1.0f / 30.0f;
-	//For each cluster
-	for (std::vector<Cluster>::iterator cluster = self->clusters.begin(); cluster not_eq self->clusters.end(); cluster++)
-	//for (uint32_t i = 0; i < self->clusters.size(); i++)
+	
+	//Lock to a fixed update rate of secondsPerUpdate
+	self->overdueTimeLeft += seconds;
+	while(self->overdueTimeLeft >= secondsPerUpdate)
 	{
-		//Cluster* cluster = &(self->clusters[i]);
-		//Check if it is in use or not, skip to the next one if it isn't
-		if(not cluster->isAllocated) continue;
-		switch (cluster->type)
-		{
-			case KEParticleSimulatorClusterTypeParticle:
-				//Lock to a fixed update rate of secondsPerUpdate
-				cluster->overdueTimeLeft += seconds;
-				while(cluster->overdueTimeLeft >= secondsPerUpdate)
-				{
-					for (uint32_t j = 0; j < cluster->elementCount; j++)
-					{
-						KEParticleSimulatorClusterElementParticle* particle = j + (KEParticleSimulatorClusterElementParticle*) cluster->elements;
-						//Begin brute-force, unoptimized force accumulation
-						//Iterate over each cluster again
-						for (std::vector<Cluster>::iterator forceCluster = self->clusters.begin(); forceCluster not_eq self->clusters.end(); forceCluster++)
-						{
-							if(not forceCluster->isAllocated) continue;
-							if(not AABB::CheckIntersection(forceCluster->bounds, cluster->bounds)) continue;
-							switch (forceCluster->type)
-							{
-								case KEParticleSimulatorClusterTypeParticle:
-									//Skip particle clusters
-									break;
-								case KEParticleSimulatorClusterTypeDirectionalForce:
-									for (uint32_t k = 0; k < forceCluster->elementCount; k++)
-									{
-										const KEParticleSimulatorClusterElementDirectionalForce* directionalForce = k + (KEParticleSimulatorClusterElementDirectionalForce*) forceCluster->elements;
-										//Calcuate the distance squared between the particle and force
-										float distanceSquared = 0;
-										for (int l = 0; l < 3; l++)
-										{
-											float difference = particle->position[l] - directionalForce->position[l];
-											distanceSquared += difference * difference;
-										}
-										//Skip this force if the particle is out of range
-										if(distanceSquared > (directionalForce->radius * directionalForce->radius)) continue;
-										//We need the inverse distance for attenuation
-										float inverseDistance = InvSqrt(distanceSquared);
-										//Attenuate by the inverse distance, scale the force by the inverse mass, and scale by the update time
-										float accelerationFactor = (1.0f / particle->mass) * inverseDistance * secondsPerUpdate;
-										//Now add to the velocity
-										for (int l = 0; l < 3; l++)
-											particle->velocity[l] += directionalForce->force[l] * accelerationFactor;
-									}
-									break;
-								case KEParticleSimulatorClusterTypeRadialForce:
-									for (uint32_t k = 0; k < forceCluster->elementCount; k++)
-									{
-										const KEParticleSimulatorClusterElementRadialForce* radialForce = k + (KEParticleSimulatorClusterElementRadialForce*) forceCluster->elements;
-										//Calcuate the distance squared and direction vector between the particle and force.  We don't normalize the direction just yet though.
-										float distanceSquared = 0;
-										float direction[3];
-										for (int l = 0; l < 3; l++)
-										{
-											float difference = particle->position[l] - radialForce->position[l];
-											direction[l] = difference;
-											distanceSquared += difference * difference;
-										}
-										//Skip this force if the particle is out of range
-										if(distanceSquared > (radialForce->radius * radialForce->radius)) continue;
-										//We need the inverse distance for attenuation
-										float inverseDistance = InvSqrt(distanceSquared);
-										//Attenuate by the inverse distance, scale the force by the inverse mass, and scale by the update time
-										//We multiply by the square inverse distance so we can normalize and attenuate at the same time
-										float acceleration = (radialForce->force / particle->mass) * inverseDistance * inverseDistance * secondsPerUpdate;
-										//Now add to the velocity
-										for (int l = 0; l < 3; l++)
-											particle->velocity[l] += direction[l] * acceleration;
-									}
-									break;
-							}
-						}
-						//End force accumulation
-						//Now update the particle position with the velocity
-						for (int k = 0; k < 3; k++)
-							particle->position[k] += particle->velocity[k] * secondsPerUpdate;
-					}
-					//Decrease the timer
-					cluster->overdueTimeLeft -= secondsPerUpdate;
-					//The process will repeat again until cluster->overdueTimeLeft < secondsPerUpdate
-				}
-				break;
-			default:
-				break;
-		}
+		UpdateSimulator(self, seconds);
+		//Decrease the timer
+		self->overdueTimeLeft -= secondsPerUpdate;
+		//The process will repeat again until self->overdueTimeLeft < secondsPerUpdate
 	}
 }
 
 KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type)
 {
+	ClearSimulatorUpdateableClusterCache(self);
+
 	Cluster cluster;
 	cluster.isAllocated = true;
 	cluster.type = type;
@@ -244,6 +418,7 @@ void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimu
 	free(cluster->elements);
 	cluster->isAllocated = false;
 	if(self->clusters.size() == clusterID) self->clusters.pop_back();
+	ClearSimulatorUpdateableClusterCache(self);
 }
 
 void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, uint32_t elementCount, KEParticleSimulatorClusterElementMappingMode mappingMode)
@@ -282,84 +457,8 @@ void KEParticleSimulatorUnmapClusterElements(KEParticleSimulator* self, KEPartic
 	KEParticleSimulatorClusterElementMappingMode mappingMode = cluster->mappingMode;
 	cluster->mappingMode = KEParticleSimulatorClusterElementMappingModeNone;
 	if(not (mappingMode & KEParticleSimulatorClusterElementMappingModeWrite)) return;
-	//Update the AABBs and other cache
-	switch (cluster->type)
-	{
-		case KEParticleSimulatorClusterTypeParticle:
-			{
-				const KEParticleSimulatorClusterElementParticle* elements = (const KEParticleSimulatorClusterElementParticle*) cluster->elements;
-				float
-					minimums[3],
-					maximums[3];
-				memcpy(minimums, elements[0].position, sizeof(minimums));
-				memcpy(maximums, elements[0].position, sizeof(maximums));
-				for (uint32_t i = 0; i < cluster->elementCount; i++)
-				{
-					for (int j = 0; j < 3; j++)
-					{
-						float position = elements[i].position[j];
-						maximums[j] = (position > maximums[j]) ? position : maximums[j];
-						minimums[j] = (position < minimums[j]) ? position : minimums[j];
-					}
-				}
-				for (int i = 0; i < 3; i++)
-				{
-					cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-					cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-				}
-			}
-			break;
-		case KEParticleSimulatorClusterTypeDirectionalForce:
-			{
-				const KEParticleSimulatorClusterElementDirectionalForce* elements = (const KEParticleSimulatorClusterElementDirectionalForce*) cluster->elements;
-				float
-					minimums[3],
-					maximums[3];
-				memcpy(minimums, elements[0].position, sizeof(minimums));
-				memcpy(maximums, elements[0].position, sizeof(maximums));
-				for (uint32_t i = 0; i < cluster->elementCount; i++)
-				{
-					for (int j = 0; j < 3; j++)
-					{
-						float maximum = elements[i].position[j] + elements[i].radius;
-						maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
-						float minimum = elements[i].position[j] - elements[i].radius;
-						minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
-					}
-				}
-				for (int i = 0; i < 3; i++)
-				{
-					cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-					cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-				}
-			}
-			break;
-		case KEParticleSimulatorClusterTypeRadialForce:
-			{
-				const KEParticleSimulatorClusterElementRadialForce* elements = (const KEParticleSimulatorClusterElementRadialForce*) cluster->elements;
-				float
-					minimums[3],
-					maximums[3];
-				memcpy(minimums, elements[0].position, sizeof(minimums));
-				memcpy(maximums, elements[0].position, sizeof(maximums));
-				for (uint32_t i = 0; i < cluster->elementCount; i++)
-				{
-					for (int j = 0; j < 3; j++)
-					{
-						float maximum = elements[i].position[j] + elements[i].radius;
-						maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
-						float minimum = elements[i].position[j] - elements[i].radius;
-						minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
-					}
-				}
-				for (int i = 0; i < 3; i++)
-				{
-					cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-					cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-				}
-			}
-			break;
-	}
+	ClearSimulatorUpdateableClusterCache(self);
+	RecalculateSingleSimulatorClusterCache(self, cluster);
 }
 
 }
