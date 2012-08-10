@@ -11,12 +11,6 @@ namespace
 	static inline float InvSqrt(float x)
 	{
 		return 1.0f / sqrtf(x);
-		/*float xhalf = 0.5f * x;
-		int i = *(int*)&x; // store floating-point bits in integer
-		i = 0x5f3759d5 - (i >> 1); // initial guess for Newton's method
-		x = *(float*)&i; // convert new bits into float
-		x = x*(1.5f - xhalf*x*x); // One round of Newton's method
-		return x;*/
 	}
 
 	struct AABB
@@ -72,79 +66,7 @@ namespace
 #pragma mark Particle Simulation
 
 namespace
-{
-	struct ForceFieldCell
-	{
-		float
-			force[3];
-	};
-	
-	struct ForceField
-	{
-		ForceFieldCell* cells;
-		uint32_t resolutions[3];
-		
-		static void AllocateCells(ForceField* self)
-		{
-			self->cells = (ForceFieldCell*) calloc(1, sizeof(ForceFieldCell));
-		}
-		
-		static void DeallocateCells(ForceField* self)
-		{
-			free(self->cells);
-			self->cells = NULL;
-		}
-		
-		static void ZeroCells(ForceField* self)
-		{
-			memset(self->cells, 0, sizeof(ForceFieldCell) * self->resolutions[0] * self->resolutions[1] * self->resolutions[2]);
-		}
-		
-		static ForceFieldCell* GetCellPointer(const ForceField* self, const uint32_t cellIndices[3])
-		{
-			return self->cells + (cellIndices[0] + cellIndices[1] * self->resolutions[0] + cellIndices[2] * self->resolutions[0] * self->resolutions[1]);
-		}
-		
-		static void InsertDirectionalForce(ForceField* self, const AABB& aabb, const KEParticleSimulatorClusterElementDirectionalForce* directionalForce)
-		{
-			float halfCellBounds[3];
-			for (int i = 0; i < 3; i++)
-			{
-				halfCellBounds[i] = aabb.halfBounds[i] / self->resolutions[i];
-			}
-			
-			uint32_t cellIndices[3] = {0, 0, 0};
-			for (; cellIndices[0] < self->resolutions[0]; cellIndices[0]++)
-			for (; cellIndices[1] < self->resolutions[1]; cellIndices[1]++)
-			for (; cellIndices[2] < self->resolutions[2]; cellIndices[2]++)
-			{
-				float cellPosition[3];
-				for (int i = 0; i < 3; i++)
-				{
-					float percentage = cellIndices[i] / (float) self->resolutions[i];
-					cellPosition[i] = percentage * 2 * aabb.halfBounds[i] + aabb.center[i] + halfCellBounds[i];
-				}
-				//Calcuate the distance squared between the particle and force
-				float distanceSquared = 0;
-				for (int l = 0; l < 3; l++)
-				{
-					float difference = cellPosition[l] - directionalForce->position[l];
-					distanceSquared += difference * difference;
-				}
-				//Skip this force if the cell is out of range
-				if(distanceSquared > (directionalForce->radius * directionalForce->radius)) return;
-				//We need the inverse distance for attenuation
-				float inverseDistance = InvSqrt(distanceSquared);
-				//Attenuate by the inverse distance
-				float accelerationFactor = inverseDistance;
-				//Now add to the velocity
-				ForceFieldCell* cell = GetCellPointer(self, cellIndices);
-				for (int l = 0; l < 3; l++)
-					cell->force[l] += directionalForce->force[l] * accelerationFactor;
-			}
-		}
-	};
-	
+{	
 	struct Octree
 	{
 		AABB bounds;
@@ -225,7 +147,7 @@ namespace
 		CachedOctree* cachedOctree;
 	};
 	
-	struct UpdateableClusterCache
+	struct SimulatorUpdateableClusterCache
 	{
 		std::vector<const Cluster*> intersectingDirectionalForceClusters;
 		std::vector<const Cluster*> intersectingRadialForceClusters;
@@ -243,7 +165,7 @@ namespace
 struct KEParticleSimulator
 {
 	std::vector<Cluster> clusters;
-	UpdateableClusterCache* updateableClusterCache;
+	SimulatorUpdateableClusterCache* updateableClusterCache;
 	double overdueTimeLeft;
 };
 
@@ -301,7 +223,7 @@ namespace
 	static void RegenerateSimulatorUpdateableClusterCache(KEParticleSimulator* self)
 	{
 		//if(self->updateableClusterCache) return;
-		if(not self->updateableClusterCache) self->updateableClusterCache = new UpdateableClusterCache;
+		if(not self->updateableClusterCache) self->updateableClusterCache = new SimulatorUpdateableClusterCache;
 		//Clear out the old data
 		self->updateableClusterCache->intersectingDirectionalForceClusters.clear();
 		self->updateableClusterCache->intersectingRadialForceClusters.clear();
@@ -311,7 +233,7 @@ namespace
 		//for (uint32_t i = 0; i < self->clusters.size(); i++)
 		{
 			Cluster* particleCluster = &(self->clusters[particleClusterIndex]);
-			UpdateableClusterCache::Package package;
+			SimulatorUpdateableClusterCache::Package package;
 			//Check if it is in use or not, skip to the next one if it isn't
 			if(not particleCluster->isAllocated) continue;
 			//Skip if it's not a particle cluster
@@ -410,7 +332,7 @@ namespace
 		}
 	};
 	
-	void ProcessParticlesIntersectingRadialForceOctree(const Octree* octree, const AABB& aabb, KEParticleSimulatorClusterElementParticle* particle, const Cluster* forceCluster, double secondsPerUpdate)
+	static void ProcessParticlesIntersectingRadialForceOctree(const Octree* octree, const AABB& aabb, KEParticleSimulatorClusterElementParticle* particle, const Cluster* forceCluster, double secondsPerUpdate)
 	{
 		if(not AABB::CheckIntersection(octree->bounds, aabb)) return;
 		for (uint32_t k = 0; k < octree->elementIndices.size(); k++)
@@ -434,7 +356,7 @@ namespace
 		//Iterate the packages
 		for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
 		{
-			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
+			const SimulatorUpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
 			{
 				float clusterMinumums[3];
 				float clusterMaximums[3];
@@ -480,13 +402,6 @@ namespace
 			intersectingDirectionalForceClusterIterationBaseIndex += package.intersectingDirectionalForceClusterCount;
 			intersectingRadialForceClusterIterationBaseIndex += package.intersectingRadialForceClusterCount;
 		}
-		
-		//Now regenerate the AABBs.  This is done separately, as we can get away with doing this less often if we want.
-		/*for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
-		{
-			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
-			RecalculateSingleSimulatorClusterCache(self, package.particleCluster);
-		}*/
 	}
 }
 
