@@ -158,7 +158,7 @@ namespace
 		}
 		~Octree()
 		{
-			delete this->children;
+			delete[] this->children;
 		}
 		
 		static void Subdivide(Octree* self)
@@ -249,61 +249,22 @@ struct KEParticleSimulator
 
 namespace
 {
+	static void ClearSingleSimulatorClusterCache(KEParticleSimulator* self, Cluster* cluster)
+	{
+		delete cluster->cachedOctree;
+		cluster->cachedOctree = NULL;
+	}
+	
 	static void RecalculateSingleSimulatorClusterCache(KEParticleSimulator* self, Cluster* cluster)
 	{
+		if(cluster->cachedOctree) return;
 		switch (cluster->type)
 		{
 			case KEParticleSimulatorClusterTypeParticle:
-				{
-					/*cluster->cachedOctree = new Cluster::CachedOctree;
-					const KEParticleSimulatorClusterElementParticle* elements = (const KEParticleSimulatorClusterElementParticle*) cluster->elements;
-					float
-						minimums[3],
-						maximums[3];
-					memcpy(minimums, elements[0].position, sizeof(minimums));
-					memcpy(maximums, elements[0].position, sizeof(maximums));
-					for (uint32_t i = 0; i < cluster->elementCount; i++)
-					{
-						for (int j = 0; j < 3; j++)
-						{
-							float position = elements[i].position[j];
-							maximums[j] = (position > maximums[j]) ? position : maximums[j];
-							minimums[j] = (position < minimums[j]) ? position : minimums[j];
-						}
-						
-					}
-					for (int i = 0; i < 3; i++)
-					{
-						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-					}*/
-				}
 				break;
 			case KEParticleSimulatorClusterTypeDirectionalForce:
 				{
 					const KEParticleSimulatorClusterElementDirectionalForce* elements = (const KEParticleSimulatorClusterElementDirectionalForce*) cluster->elements;
-					/*float
-						minimums[3],
-						maximums[3];
-					memcpy(minimums, elements[0].position, sizeof(minimums));
-					memcpy(maximums, elements[0].position, sizeof(maximums));
-					for (uint32_t i = 0; i < cluster->elementCount; i++)
-					{
-						for (int j = 0; j < 3; j++)
-						{
-							float maximum = elements[i].position[j] + elements[i].radius;
-							maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
-							float minimum = elements[i].position[j] - elements[i].radius;
-							minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
-						}
-					}
-					for (int i = 0; i < 3; i++)
-					{
-						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-					}*/
-					delete cluster->cachedOctree;
-					cluster->cachedOctree = new Cluster::CachedOctree;
 					cluster->cachedOctree->bounds = cluster->bounds;
 					for (uint32_t i = 0; i < cluster->elementCount; i++)
 					{
@@ -320,27 +281,6 @@ namespace
 			case KEParticleSimulatorClusterTypeRadialForce:
 				{
 					const KEParticleSimulatorClusterElementRadialForce* elements = (const KEParticleSimulatorClusterElementRadialForce*) cluster->elements;
-					/*float
-						minimums[3],
-						maximums[3];
-					memcpy(minimums, elements[0].position, sizeof(minimums));
-					memcpy(maximums, elements[0].position, sizeof(maximums));
-					for (uint32_t i = 0; i < cluster->elementCount; i++)
-					{
-						for (int j = 0; j < 3; j++)
-						{
-							float maximum = elements[i].position[j] + elements[i].radius;
-							maximums[j] = (maximum > maximums[j]) ? maximum : maximums[j];
-							float minimum = elements[i].position[j] - elements[i].radius;
-							minimums[j] = (minimum < minimums[j]) ? minimum : minimums[j];
-						}
-					}
-					for (int i = 0; i < 3; i++)
-					{
-						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
-						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-					}*/
-					delete cluster->cachedOctree;
 					cluster->cachedOctree = new Cluster::CachedOctree;
 					cluster->cachedOctree->bounds = cluster->bounds;
 					for (uint32_t i = 0; i < cluster->elementCount; i++)
@@ -384,7 +324,7 @@ namespace
 			package.particleCluster = particleCluster;
 			for (uint32_t forceClusterIndex = 0; forceClusterIndex < self->clusters.size(); forceClusterIndex++)
 			{
-				const Cluster* forceCluster = &(self->clusters[forceClusterIndex]);
+				Cluster* forceCluster = &(self->clusters[forceClusterIndex]);
 				if(not forceCluster->isAllocated) continue;
 				if(not AABB::CheckIntersection(forceCluster->bounds, particleCluster->bounds)) continue;
 				switch (forceCluster->type)
@@ -393,10 +333,12 @@ namespace
 					case KEParticleSimulatorClusterTypeDirectionalForce:
 						self->updateableClusterCache->intersectingDirectionalForceClusters.push_back(forceCluster);
 						package.intersectingDirectionalForceClusterCount++;
+						RecalculateSingleSimulatorClusterCache(self, forceCluster);
 						break;
 					case KEParticleSimulatorClusterTypeRadialForce:
 						self->updateableClusterCache->intersectingRadialForceClusters.push_back(forceCluster);
 						package.intersectingRadialForceClusterCount++;
+						RecalculateSingleSimulatorClusterCache(self, forceCluster);
 						break;
 				}
 			}
@@ -608,6 +550,7 @@ KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulato
 	cluster.type = type;
 	cluster.elementCount = 0;
 	cluster.elements = NULL;
+	cluster.cachedOctree = NULL;
 	
 	//Find an empty slot if it exists
 	for (KEParticleSimulatorClusterID i = 0; i < self->clusters.size(); i++)
@@ -642,7 +585,7 @@ void KEParticleSimulatorSetClusterBounds(KEParticleSimulator* self, KEParticleSi
 		cluster->bounds.halfBounds[i] = halfBounds[i];
 	}
 	ClearSimulatorUpdateableClusterCache(self);
-	RecalculateSingleSimulatorClusterCache(self, cluster);
+	ClearSingleSimulatorClusterCache(self, cluster);
 }
 
 void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, uint32_t elementCount, KEParticleSimulatorClusterElementMappingMode mappingMode)
@@ -682,7 +625,7 @@ void KEParticleSimulatorUnmapClusterElements(KEParticleSimulator* self, KEPartic
 	cluster->mappingMode = KEParticleSimulatorClusterElementMappingModeNone;
 	if(not (mappingMode & KEParticleSimulatorClusterElementMappingModeWrite)) return;
 	ClearSimulatorUpdateableClusterCache(self);
-	RecalculateSingleSimulatorClusterCache(self, cluster);
+	ClearSingleSimulatorClusterCache(self, cluster);
 }
 
 }
