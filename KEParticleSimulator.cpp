@@ -222,12 +222,13 @@ namespace
 	
 	static void RegenerateSimulatorUpdateableClusterCache(KEParticleSimulator* self)
 	{
-		//if(self->updateableClusterCache) return;
-		if(not self->updateableClusterCache) self->updateableClusterCache = new SimulatorUpdateableClusterCache;
+		if(self->updateableClusterCache) return;
+		//if(not self->updateableClusterCache)
+		self->updateableClusterCache = new SimulatorUpdateableClusterCache;
 		//Clear out the old data
-		self->updateableClusterCache->intersectingDirectionalForceClusters.clear();
-		self->updateableClusterCache->intersectingRadialForceClusters.clear();
-		self->updateableClusterCache->updateableParticleClusterPackages.clear();
+		//self->updateableClusterCache->intersectingDirectionalForceClusters.clear();
+		//self->updateableClusterCache->intersectingRadialForceClusters.clear();
+		//self->updateableClusterCache->updateableParticleClusterPackages.clear();
 		//For each cluster
 		for (uint32_t particleClusterIndex = 0; particleClusterIndex < self->clusters.size(); particleClusterIndex++)
 		//for (uint32_t i = 0; i < self->clusters.size(); i++)
