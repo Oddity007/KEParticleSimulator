@@ -73,6 +73,8 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds);
 KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type);
 void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
 
+void KEParticleSimulatorSetClusterBounds(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, const double center[3], const double halfBounds[3]);
+
 /*void KEParticleSimulatorBeginClusterEditing(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);
 void KEParticleSimulatorSetClusterPropertyPointer(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, KEParticleSimulatorClusterPropertyName propertyName, uint32_t elementStart, uint32_t elementCount, uint32_t elementComponentCount, KEParticleSimulatorTypeCode elementComponentTypeCode, bool isNormalized, size_t stride, const void* pointer);
 void KEParticleSimulatorEndClusterEditing(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID);

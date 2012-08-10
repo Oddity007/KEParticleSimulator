@@ -73,6 +73,146 @@ namespace
 
 namespace
 {
+	struct ForceFieldCell
+	{
+		float
+			force[3];
+	};
+	
+	struct ForceField
+	{
+		ForceFieldCell* cells;
+		uint32_t resolutions[3];
+		
+		static void AllocateCells(ForceField* self)
+		{
+			self->cells = (ForceFieldCell*) calloc(1, sizeof(ForceFieldCell));
+		}
+		
+		static void DeallocateCells(ForceField* self)
+		{
+			free(self->cells);
+			self->cells = NULL;
+		}
+		
+		static void ZeroCells(ForceField* self)
+		{
+			memset(self->cells, 0, sizeof(ForceFieldCell) * self->resolutions[0] * self->resolutions[1] * self->resolutions[2]);
+		}
+		
+		static ForceFieldCell* GetCellPointer(const ForceField* self, const uint32_t cellIndices[3])
+		{
+			return self->cells + (cellIndices[0] + cellIndices[1] * self->resolutions[0] + cellIndices[2] * self->resolutions[0] * self->resolutions[1]);
+		}
+		
+		static void InsertDirectionalForce(ForceField* self, const AABB& aabb, const KEParticleSimulatorClusterElementDirectionalForce* directionalForce)
+		{
+			float halfCellBounds[3];
+			for (int i = 0; i < 3; i++)
+			{
+				halfCellBounds[i] = aabb.halfBounds[i] / self->resolutions[i];
+			}
+			
+			uint32_t cellIndices[3] = {0, 0, 0};
+			for (; cellIndices[0] < self->resolutions[0]; cellIndices[0]++)
+			for (; cellIndices[1] < self->resolutions[1]; cellIndices[1]++)
+			for (; cellIndices[2] < self->resolutions[2]; cellIndices[2]++)
+			{
+				float cellPosition[3];
+				for (int i = 0; i < 3; i++)
+				{
+					float percentage = cellIndices[i] / (float) self->resolutions[i];
+					cellPosition[i] = percentage * 2 * aabb.halfBounds[i] + aabb.center[i] + halfCellBounds[i];
+				}
+				//Calcuate the distance squared between the particle and force
+				float distanceSquared = 0;
+				for (int l = 0; l < 3; l++)
+				{
+					float difference = cellPosition[l] - directionalForce->position[l];
+					distanceSquared += difference * difference;
+				}
+				//Skip this force if the cell is out of range
+				if(distanceSquared > (directionalForce->radius * directionalForce->radius)) return;
+				//We need the inverse distance for attenuation
+				float inverseDistance = InvSqrt(distanceSquared);
+				//Attenuate by the inverse distance
+				float accelerationFactor = inverseDistance;
+				//Now add to the velocity
+				ForceFieldCell* cell = GetCellPointer(self, cellIndices);
+				for (int l = 0; l < 3; l++)
+					cell->force[l] += directionalForce->force[l] * accelerationFactor;
+			}
+		}
+	};
+	
+	struct Octree
+	{
+		AABB bounds;
+		std::vector<uint32_t> elementIndices;
+		Octree* children;//8 children or NULL
+		
+		Octree()
+		{
+			this->children = NULL;
+			memset(& this->bounds, 0, sizeof(this->bounds));
+		}
+		~Octree()
+		{
+			delete this->children;
+		}
+		
+		static void Subdivide(Octree* self)
+		{
+			if(self->children) return;
+			self->children = new Octree[8];
+			int childIndexOffsets[3] = {0, 0, 0};
+			for (; childIndexOffsets[0] < 2; childIndexOffsets[0]++)
+			for (; childIndexOffsets[1] < 2; childIndexOffsets[1]++)
+			for (; childIndexOffsets[2] < 2; childIndexOffsets[2]++)
+			{
+				int i = childIndexOffsets[0] * childIndexOffsets[1] * 2 + childIndexOffsets[2] * 2 * 2;
+				for (int j = 0; j < 3; j++)
+				{
+					self->children[i].bounds.center[j] = self->bounds.center[j] + (childIndexOffsets[j] ? 0.5: -0.5) * self->bounds.halfBounds[j];
+					self->children[i].bounds.halfBounds[j] = self->bounds.halfBounds[j] * 0.5;
+				}
+			}
+		}
+		
+		static bool Insert(Octree* self, const AABB& aabb, uint32_t elementIndex)
+		{
+			if(not AABB::CheckEncapsulation(self->bounds, aabb)) return false;
+			for (int i = 0; i < 3; i++)
+			{
+				//If the inserted aabb straddles the center, none of the children will ever be able to encapsulate it, so we insert it into this octree.
+				float aabbMin = aabb.center[i] - aabb.halfBounds[i];
+				float aabbMax = aabb.center[i] + aabb.halfBounds[i];
+				float octreeCenter = self->bounds.center[i];
+				if(octreeCenter < aabbMax and octreeCenter > aabbMin)
+				{
+					self->elementIndices.push_back(elementIndex);
+					return true;
+				}
+				//Now try a bit of tolerance to prevent extreme octree depths.
+				const float toleranceFactor = 0.25;
+				if(aabb.halfBounds[i] > toleranceFactor * self->bounds.halfBounds[i])
+				{
+					self->elementIndices.push_back(elementIndex);
+					return true;
+				}
+			}
+			//If it doesn't straddle, we can try inserting it into the children.
+			Subdivide(self);
+			for (int i = 0; i < 8; i++)
+			{
+				if(Insert(& self->children[i], aabb, elementIndex)) return true;
+			}
+			//It should be logically impossible to arrive here.  Crash if we do so we can catch algorithm errors.
+			abort();
+			return false;
+		}
+	};
+	
 	struct Cluster
 	{
 		KEParticleSimulatorClusterType type;
@@ -81,6 +221,8 @@ namespace
 		bool isAllocated;
 		KEParticleSimulatorClusterElementMappingMode mappingMode;
 		AABB bounds;
+		typedef Octree CachedOctree;
+		CachedOctree* cachedOctree;
 	};
 	
 	struct UpdateableClusterCache
@@ -113,6 +255,7 @@ namespace
 		{
 			case KEParticleSimulatorClusterTypeParticle:
 				{
+					/*cluster->cachedOctree = new Cluster::CachedOctree;
 					const KEParticleSimulatorClusterElementParticle* elements = (const KEParticleSimulatorClusterElementParticle*) cluster->elements;
 					float
 						minimums[3],
@@ -127,18 +270,19 @@ namespace
 							maximums[j] = (position > maximums[j]) ? position : maximums[j];
 							minimums[j] = (position < minimums[j]) ? position : minimums[j];
 						}
+						
 					}
 					for (int i = 0; i < 3; i++)
 					{
 						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
 						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
-					}
+					}*/
 				}
 				break;
 			case KEParticleSimulatorClusterTypeDirectionalForce:
 				{
 					const KEParticleSimulatorClusterElementDirectionalForce* elements = (const KEParticleSimulatorClusterElementDirectionalForce*) cluster->elements;
-					float
+					/*float
 						minimums[3],
 						maximums[3];
 					memcpy(minimums, elements[0].position, sizeof(minimums));
@@ -157,13 +301,26 @@ namespace
 					{
 						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
 						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
+					}*/
+					delete cluster->cachedOctree;
+					cluster->cachedOctree = new Cluster::CachedOctree;
+					cluster->cachedOctree->bounds = cluster->bounds;
+					for (uint32_t i = 0; i < cluster->elementCount; i++)
+					{
+						AABB aabb;
+						for (int j = 0; j < 3; j++)
+						{
+							aabb.center[j] = elements[i].position[j];
+							aabb.halfBounds[j] = elements[i].radius;
+						}
+						Cluster::CachedOctree::Insert(cluster->cachedOctree, aabb, i);
 					}
 				}
 				break;
 			case KEParticleSimulatorClusterTypeRadialForce:
 				{
 					const KEParticleSimulatorClusterElementRadialForce* elements = (const KEParticleSimulatorClusterElementRadialForce*) cluster->elements;
-					float
+					/*float
 						minimums[3],
 						maximums[3];
 					memcpy(minimums, elements[0].position, sizeof(minimums));
@@ -182,6 +339,19 @@ namespace
 					{
 						cluster->bounds.halfBounds[i] = (maximums[i] - minimums[i]) * 0.5f;
 						cluster->bounds.center[i] = cluster->bounds.halfBounds[i] + minimums[i];
+					}*/
+					delete cluster->cachedOctree;
+					cluster->cachedOctree = new Cluster::CachedOctree;
+					cluster->cachedOctree->bounds = cluster->bounds;
+					for (uint32_t i = 0; i < cluster->elementCount; i++)
+					{
+						AABB aabb;
+						for (int j = 0; j < 3; j++)
+						{
+							aabb.center[j] = elements[i].position[j];
+							aabb.halfBounds[j] = elements[i].radius;
+						}
+						Cluster::CachedOctree::Insert(cluster->cachedOctree, aabb, i);
 					}
 				}
 				break;
@@ -282,6 +452,36 @@ namespace
 		for (int l = 0; l < 3; l++)
 			particle->velocity[l] += direction[l] * acceleration;
 	}
+	
+	static void ProcessParticlesIntersectingDirectionalForceOctree(const Octree* octree, const AABB& aabb, KEParticleSimulatorClusterElementParticle* particle, const Cluster* forceCluster, double secondsPerUpdate)
+	{
+		if(not AABB::CheckIntersection(octree->bounds, aabb)) return;
+		for (uint32_t k = 0; k < octree->elementIndices.size(); k++)
+		{
+			const KEParticleSimulatorClusterElementDirectionalForce* directionalForce = k + (KEParticleSimulatorClusterElementDirectionalForce*) forceCluster->elements;
+			UpdateParticleVelocityWithDirectionalForce(particle, directionalForce, secondsPerUpdate);
+		}
+		if(not octree->children) return;
+		for (int k = 0; k < 8; k++)
+		{
+			ProcessParticlesIntersectingDirectionalForceOctree(& octree->children[k], aabb, particle, forceCluster, secondsPerUpdate);
+		}
+	};
+	
+	void ProcessParticlesIntersectingRadialForceOctree(const Octree* octree, const AABB& aabb, KEParticleSimulatorClusterElementParticle* particle, const Cluster* forceCluster, double secondsPerUpdate)
+	{
+		if(not AABB::CheckIntersection(octree->bounds, aabb)) return;
+		for (uint32_t k = 0; k < octree->elementIndices.size(); k++)
+		{
+			const KEParticleSimulatorClusterElementRadialForce* radialForce = k + (KEParticleSimulatorClusterElementRadialForce*) forceCluster->elements;
+			UpdateParticleVelocityWithRadialForce(particle, radialForce, secondsPerUpdate);
+		}
+		if(not octree->children) return;
+		for (int k = 0; k < 8; k++)
+		{
+			ProcessParticlesIntersectingRadialForceOctree(& octree->children[k], aabb, particle, forceCluster, secondsPerUpdate);
+		}
+	};
 
 	static void UpdateSimulator(KEParticleSimulator* self, double secondsPerUpdate)
 	{
@@ -294,35 +494,44 @@ namespace
 		{
 			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
 			{
+				float clusterMinumums[3];
+				float clusterMaximums[3];
+				for (int i = 0; i < 3; i++)
+				{
+					clusterMinumums[i] = package.particleCluster->bounds.center[i] - package.particleCluster->bounds.halfBounds[i];
+					clusterMaximums[i] = package.particleCluster->bounds.center[i] + package.particleCluster->bounds.halfBounds[i];
+				}
 				for (uint32_t j = 0; j < package.particleCluster->elementCount; j++)
 				{
 					KEParticleSimulatorClusterElementParticle* particle = j + (KEParticleSimulatorClusterElementParticle*) package.particleCluster->elements;
-					//Begin brute-force, unoptimized force accumulation
+					AABB particleAABB;
+					for (int k = 0; k < 3; k++)
+					{
+						particleAABB.center[k] = particle->position[k];
+						particleAABB.halfBounds[k] = 0;
+					}
+					//Begin octree traversal force accumulation
 					//Iterate over each intersecting directional force cluster
 					for (uint32_t i = 0; i < package.intersectingDirectionalForceClusterCount; i++)
 					{
 						const Cluster* forceCluster = self->updateableClusterCache->intersectingDirectionalForceClusters[intersectingDirectionalForceClusterIterationBaseIndex + i];
-						for (uint32_t k = 0; k < forceCluster->elementCount; k++)
-						{
-							const KEParticleSimulatorClusterElementDirectionalForce* directionalForce = k + (KEParticleSimulatorClusterElementDirectionalForce*) forceCluster->elements;
-							UpdateParticleVelocityWithDirectionalForce(particle, directionalForce, secondsPerUpdate);
-						}
+						ProcessParticlesIntersectingDirectionalForceOctree(forceCluster->cachedOctree, particleAABB, particle, forceCluster, secondsPerUpdate);
 					}
 				
 					//Iterate over each intersecting radial force cluster
 					for (uint32_t i = 0; i < package.intersectingRadialForceClusterCount; i++)
 					{
 						const Cluster* forceCluster = self->updateableClusterCache->intersectingRadialForceClusters[intersectingRadialForceClusterIterationBaseIndex + i];
-						for (uint32_t k = 0; k < forceCluster->elementCount; k++)
-						{
-							const KEParticleSimulatorClusterElementRadialForce* radialForce = k + (KEParticleSimulatorClusterElementRadialForce*) forceCluster->elements;
-							UpdateParticleVelocityWithRadialForce(particle, radialForce, secondsPerUpdate);
-						}
+						ProcessParticlesIntersectingRadialForceOctree(forceCluster->cachedOctree, particleAABB, particle, forceCluster, secondsPerUpdate);
 					}
 					//End force accumulation
-					//Now update the particle position with the velocity
+					//Now update the particle position with the velocity, clamping the particle position to the cluster's aabb
 					for (int k = 0; k < 3; k++)
-							particle->position[k] += particle->velocity[k] * secondsPerUpdate;
+					{
+						particle->position[k] += particle->velocity[k] * secondsPerUpdate;
+						if(clusterMinumums[k] > particle->position[k]) particle->position[k] = clusterMinumums[k];
+						if(clusterMaximums[k] < particle->position[k]) particle->position[k] = clusterMaximums[k];
+					}
 				}
 			}
 			//Shift the intersecting cluster iteration base indices
@@ -331,11 +540,11 @@ namespace
 		}
 		
 		//Now regenerate the AABBs.  This is done separately, as we can get away with doing this less often if we want.
-		for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
+		/*for (uint32_t packageIndex = 0; packageIndex < self->updateableClusterCache->updateableParticleClusterPackages.size(); packageIndex++)
 		{
 			const UpdateableClusterCache::Package& package = self->updateableClusterCache->updateableParticleClusterPackages[packageIndex];
 			RecalculateSingleSimulatorClusterCache(self, package.particleCluster);
-		}
+		}*/
 	}
 }
 
@@ -375,17 +584,19 @@ void KEParticleSimulatorUpdate(KEParticleSimulator* self, double seconds)
 	RegenerateSimulatorUpdateableClusterCache(self);
 
 	//Eventually make this a user changeable value
-	const float secondsPerUpdate = 1.0f / 30.0f;
+	//const float secondsPerUpdate = 1.0f / 30.0f;
+	
+	const float secondsPerUpdate = seconds;
 	
 	//Lock to a fixed update rate of secondsPerUpdate
-	self->overdueTimeLeft += seconds;
-	while(self->overdueTimeLeft >= secondsPerUpdate)
-	{
-		UpdateSimulator(self, seconds);
+	//self->overdueTimeLeft += seconds;
+	//while(self->overdueTimeLeft >= secondsPerUpdate)
+	//{
+		UpdateSimulator(self, secondsPerUpdate);
 		//Decrease the timer
-		self->overdueTimeLeft -= secondsPerUpdate;
+		//self->overdueTimeLeft -= secondsPerUpdate;
 		//The process will repeat again until self->overdueTimeLeft < secondsPerUpdate
-	}
+	//}
 }
 
 KEParticleSimulatorClusterID KEParticleSimulatorCreateCluster(KEParticleSimulator* self, KEParticleSimulatorClusterType type)
@@ -419,6 +630,19 @@ void KEParticleSimulatorDestroyCluster(KEParticleSimulator* self, KEParticleSimu
 	cluster->isAllocated = false;
 	if(self->clusters.size() == clusterID) self->clusters.pop_back();
 	ClearSimulatorUpdateableClusterCache(self);
+}
+
+void KEParticleSimulatorSetClusterBounds(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, const double center[3], const double halfBounds[3])
+{
+	if(not clusterID) return;
+	Cluster* cluster = & self->clusters[clusterID - 1];
+	for (int i = 0; i < 3; i++)
+	{
+		cluster->bounds.center[i] = center[i];
+		cluster->bounds.halfBounds[i] = halfBounds[i];
+	}
+	ClearSimulatorUpdateableClusterCache(self);
+	RecalculateSingleSimulatorClusterCache(self, cluster);
 }
 
 void* KEParticleSimulatorMapClusterElements(KEParticleSimulator* self, KEParticleSimulatorClusterID clusterID, uint32_t elementCount, KEParticleSimulatorClusterElementMappingMode mappingMode)
